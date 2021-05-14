@@ -363,30 +363,32 @@ int acm_rd_req(unsigned short blk_num)
         req.cmd_size.req_size[1] = (acm_idx[blk_num].blk_size + 2) & 0x00ff;
         req.instruction = 0x2;  //Write
         memcpy(req.data, acm_idx[blk_num].blk_ptr, acm_idx[blk_num].blk_size);
-        printf("We got a read request. Send data to acm. Block: %x, size(big_endian): %x, data: %x %x %x %x\n", blk_num, req.cmd_size.big_end_req_sz,
-                   req.data[0], req.data[1], req.data[2], req.data[3]);
+        //printf("We got a read request. Send data to acm. Block: %x, size(big_endian): %x, data: %x %x %x %x\n", blk_num, req.cmd_size.big_end_req_sz,
+        //           req.data[0], req.data[1], req.data[2], req.data[3]);
 
         //Do file write to acm_out with requested data
         fp = open(ACM_OUT, O_RDWR);
-        if(fp > 0)
+        if(fp >= 0)
         {
             //We can send data
             sz = write(fp, (void *)&req, acm_idx[blk_num].blk_size + 2 + 3); //cmd hdr + block num + block data
-            printf("We wrote %x bytes to ACM driver to send out(read request)\n", sz);
+            //printf("We wrote %x bytes to ACM driver to send out(read request)\n", sz);
+            close(fp);
+            return(0);
         }    
-        close(fp);
     }
+    return(1);
 }
 /*
      Incoming data from ACM.
      Triggered by poll() on out file
 */
-int acm_wr_req(unsigned short blk_num, unsigned short sz, unsigned char *buff)
+void acm_wr_req(unsigned short blk_num, unsigned short sz, unsigned char *buff)
 {
     unsigned char out[512];
 
     //Update acm block data
-    printf("acm Write req to iLO from acm-blk: %x, sz: %x, data: %x %x %x %x\n", blk_num, sz, buff[0], buff[1], buff[2], buff[3]);
+    //printf("acm Write req to iLO from acm-blk: %x, sz: %x, data: %x %x %x %x\n", blk_num, sz, buff[0], buff[1], buff[2], buff[3]);
     if(blk_num <= ACM_MAX_BLOCK_NUM)
         memcpy(acm_idx[blk_num].blk_ptr, buff, (acm_idx[blk_num].blk_size > sz) ? sz : acm_idx[blk_num].blk_size);    
 }
@@ -426,12 +428,12 @@ void *poll_thread(void *vargp)
        do
        {
             input_fd = open(ACM_IN, O_RDWR);
-            if(input_fd == -1)
+            if(input_fd < 0)
             {
                 sleep(2);
             }
             printf("Opening sysfs input interface for polling: %s, r: %x\n",ACM_IN, input_fd);
-       }while(input_fd == -1); //wait forever for the file to show up.  Driver provides it
+       }while(input_fd < 0); //wait forever for the file to show up.  Driver provides it
 
        //wait until we get a file so we know the driver is loaded
        acm_ping_init();   
@@ -444,7 +446,7 @@ void *poll_thread(void *vargp)
                 sz = read(input_fd, buff, sizeof(buff));  //read whole buffer in to process
                 indx = 0;
 
-                printf("Poll Received ACM request for %x bytes\n", sz);
+                //printf("Poll Received ACM request for %x bytes\n", sz);
                 if(sz >= 5)
                 {   
                     //Take first two bytes out of buffer as the block size + block num(2 bytes)
@@ -454,7 +456,7 @@ void *poll_thread(void *vargp)
                     if(req.cmd_size.big_end_req_sz + 3 == sz)
                     { //do size check on data read compared to size in command header + 3 for header
                         req.instruction = buff[indx++];
-                        printf("Read %x bytes, inst: %x, req size: %x\n", sz, req.instruction, req.cmd_size.big_end_req_sz);
+                        //printf("Read %x bytes, inst: %x, req size: %x\n", sz, req.instruction, req.cmd_size.big_end_req_sz);
                         //We have inst and block size.  Check if valid
                         switch(req.instruction)
                         {
@@ -463,7 +465,7 @@ void *poll_thread(void *vargp)
                                     req.block_num.blk_num[1] = buff[indx++];  //endian swap
                                     req.block_num.blk_num[0] = buff[indx++];
 
-                                    printf("Read request for block_num: %x\n",req.block_num.big_end_blk_num);
+                                    //printf("Read request for block_num: %x\n",req.block_num.big_end_blk_num);
                                     //process read request
                                     acm_rd_req(req.block_num.big_end_blk_num);
 //                                    sz = read(input_fd, data, 1);  //read 1 extra byte
@@ -475,8 +477,8 @@ void *poll_thread(void *vargp)
                                     req.block_num.blk_num[1] = buff[indx++];  //endian swap
                                     req.block_num.blk_num[0] = buff[indx++];
 
-                                    printf("Write request for blk_num: %x, size %x\n",
-                                           req.block_num.big_end_blk_num, req.cmd_size.big_end_req_sz);
+                                    //printf("Write request for blk_num: %x, size %x\n",
+                                    //       req.block_num.big_end_blk_num, req.cmd_size.big_end_req_sz);
                                     ptr = &buff[indx];
                                     
                                     acm_wr_req(req.block_num.big_end_blk_num, req.cmd_size.big_end_req_sz-2, ptr);
@@ -493,11 +495,20 @@ void *poll_thread(void *vargp)
                     {   
                         //Error in size.
                         printf("Size error reading block.  Read %x bytes, size: %x\n", sz, req.cmd_size.big_end_req_sz);
-                        if(input_fd)
+                        if(input_fd >= 0)
                         {
                            close(input_fd);
                         }
-                        input_fd = open(ACM_IN, O_RDWR);
+                        
+                        do
+                        {
+                             input_fd = open(ACM_IN, O_RDWR);
+                             if(input_fd < 0)
+                             {
+                                 sleep(2);
+                             }
+                             printf("Opening sysfs input interface for polling: %s, r: %x\n",ACM_IN, input_fd);
+                        }while(input_fd < 0); //wait forever for the file to show up.  Driver provides it
                         sleep(1);
                     }
                 }
@@ -522,7 +533,10 @@ int main(void)
     struct thread_info *tinfo = calloc(2, sizeof(*tinfo));
 
     if(tinfo == NULL)
+    {
       printf("Failed to alloc tinfo\n");
+      exit(0);
+    }
     
     tinfo[0].thread_num = 1;
     tinfo[0].blocks = NULL;
